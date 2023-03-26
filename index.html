@@ -1,0 +1,71 @@
+// SPDX-License-Identifier: GPL-3.0-only
+
+pragma solidity ^0.8.0;
+
+import "https://github.com/solana/solana-program-library/blob/3c3e3d48f74c0a2b8a03227b4a4dbf4adbf37360/program/src/solana_program/lib.rs";
+import "https://github.com/solana/solana-program-library/blob/3c3e3d48f74c0a2b8a03227b4a4dbf4adbf37360/program/src/solana_program/sysvar.rs";
+import "https://github.com/solana/solana-program-library/blob/3c3e3d48f74c0a2b8a03227b4a4dbf4adbf37360/program/src/solana_program/runtime.rs";
+
+#[derive(AnchorSerialize, AnchorDeserialize, Clone, Debug, PartialEq)]
+pub struct Config {
+    pub owner: Pubkey,
+    pub reward_fee: u32,
+    pub reward_pot: u64,
+}
+
+#[derive(AnchorSerialize, AnchorDeserialize, Clone, Debug, PartialEq)]
+pub struct Staker {
+    pub nfts: Vec<Pubkey>,
+    pub stake_amount: u64,
+    pub lockup_period: u32,
+    pub unlock_time: i64,
+    pub last_reward_claim_time: i64,
+}
+
+#[program]
+pub mod staking {
+    use super::*;
+
+    pub fn initialize(ctx: Context<Initialize>, reward_fee: u32) -> ProgramResult {
+        let config = &mut ctx.accounts.config.load_init()?;
+        config.owner = *ctx.accounts.owner.key();
+        config.reward_fee = reward_fee;
+        Ok(())
+    }
+
+    pub fn stake(ctx: Context<Stake>, amount: u64, lockup_period: u32) -> ProgramResult {
+        let staker_info = &mut ctx.accounts.staker_info.load_mut()?;
+        if amount > ctx.accounts.token_account.amount {
+            return Err(ErrorCode::InsufficientTokenAmount.into());
+        }
+        if lockup_period < 30 || lockup_period > 90 {
+            return Err(ErrorCode::InvalidLockupPeriod.into());
+        }
+        let unlock_time = Clock::get()?.unix_timestamp + (lockup_period as i64 * 86400);
+        staker_info.nfts.push(*ctx.accounts.nft.key());
+        staker_info.stake_amount += amount;
+        staker_info.lockup_period = lockup_period;
+        staker_info.unlock_time = unlock_time;
+        staker_info.last_reward_claim_time = Clock::get()?.unix_timestamp;
+        Ok(())
+    }
+
+    pub fn unstake(ctx: Context<Unstake>, amount: u64) -> ProgramResult {
+        let staker_info = &mut ctx.accounts.staker_info.load_mut()?;
+        if amount > staker_info.stake_amount {
+            return Err(ErrorCode::InsufficientStakeAmount.into());
+        }
+        let unlock_time = Clock::get()?.unix_timestamp;
+        if staker_info.unlock_time > unlock_time {
+            return Err(ErrorCode::LockupPeriodNotOver.into());
+        }
+        let idx = staker_info.nfts.iter().position(|x| *x == *ctx.accounts.nft.key()).unwrap();
+        staker_info.nfts.remove(idx);
+        staker_info.stake_amount -= amount;
+        staker_info.unlock_time = 0;
+        staker_info.last_reward_claim_time = 0;
+        Ok(())
+    }
+
+    pub fn claim_reward(ctx: Context<ClaimReward>) -> ProgramResult {
+        let staker_info
